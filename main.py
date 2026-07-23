@@ -23,8 +23,13 @@ app.add_middleware(
 
 # ========== 配置 ==========
 MAIN_TOKEN = os.getenv("MAIN_TOKEN")
+# 新增远程操控密码，只存在后端环境变量
+REMOTE_CTRL_PWD = os.getenv("REMOTE_CTRL_PWD")
+
 if not MAIN_TOKEN:
     raise RuntimeError("环境变量 MAIN_TOKEN 未配置！请到平台后台添加")
+if not REMOTE_CTRL_PWD:
+    raise RuntimeError("环境变量 REMOTE_CTRL_PWD 未配置！远程操控密码缺失")
 
 TASK_EXPIRE_SEC = 30       # 任务30秒超时自动清理
 MAX_SCREEN_CACHE = 15      # 最多保留15张截图，防止内存爆炸
@@ -63,8 +68,18 @@ def clean_expire():
         for i in range(del_count):
             del result_store[sorted_keys[i]]
 
-# ========== 网站端接口 ==========
+# ========== 【新增】远程操控密码校验接口 ==========
+@app.get("/api/remote_auth", summary="远程操控密码验证接口")
+async def remote_auth(token: str = Query(), pwd: str = Query()):
+    # 先校验全局主密钥
+    check_token(token)
+    # 比对后端存放的远程密码
+    if pwd == REMOTE_CTRL_PWD:
+        return {"success": True, "msg": "验证通过"}
+    else:
+        return {"success": False, "msg": "密码错误，请重新输入"}
 
+# ========== 网站端接口 ==========
 @app.get("/task/screenshot", summary="网站下发截屏任务")
 async def create_screenshot_task(token: str = Query()):
     check_token(token)
@@ -89,13 +104,12 @@ async def get_image(task_id: str, token: str = Query()):
     return Response(content=result_store[task_id]["data"], media_type="image/jpeg")
 
 # ========== 安卓APP端接口 ==========
-
 @app.get("/client/poll", summary="APP轮询获取任务")
 async def poll_task(token: str = Query()):
     check_token(token)
     clean_expire()
     if task_queue:
-        # FIFO 取出最先进入的任务（修复原popitem随机取任务bug）
+        # FIFO 取出最先进入的任务
         tid = next(iter(task_queue.keys()))
         data = task_queue.pop(tid)
         return {"task_id": tid, "data": data}
@@ -121,6 +135,3 @@ async def upload_result(task_id: str, token: str = Query(), file: UploadFile = F
 @app.get("/ping")
 async def ping():
     return {"status": "alive", "pending_tasks": len(task_queue), "cached_screens": len(result_store)}
-
-
-
