@@ -5,53 +5,62 @@ import os
 
 app = FastAPI()
 
-# 从平台环境变量读取密钥！不再写死代码
+# 从环境变量读取密钥，不在代码写死！
 MAIN_TOKEN = os.getenv("MAIN_TOKEN")
 if not MAIN_TOKEN:
-    raise RuntimeError("请在FastAPICloud后台配置环境变量 MAIN_TOKEN")
+    raise RuntimeError("环境变量 MAIN_TOKEN 未配置！请到平台后台添加")
 
 task_queue = {}
 result_store = {}
 
 def check_token(token: str):
     if token != MAIN_TOKEN:
-        raise HTTPException(status_code=401, detail="访问密钥错误")
+        raise HTTPException(status_code=403, detail="访问密钥错误")
 
+# 网站下发截屏任务
 @app.get("/task/screenshot")
-async def create_screenshot_task(token: str = Query(...)):
+async def create_screenshot_task(token: str = Query()):
     check_token(token)
-    task_id = str(uuid.uuid4())
-    task_queue[task_id] = {"type":"screenshot","create_time":time.time()}
-    return {"task_id": task_id}
+    tid = str(uuid.uuid4())
+    task_queue[tid] = {"type": "screenshot", "time": time.time()}
+    return {"task_id": tid}
 
+# 网站下发点击任务
 @app.get("/task/click")
-async def create_click_task(x:int,y:int,token:str = Query(...)):
+async def create_click_task(x: int, y: int, token: str = Query()):
     check_token(token)
-    task_id = str(uuid.uuid4())
-    task_queue[task_id] = {"type":"click","x":x,"y":y,"create_time":time.time()}
-    return {"task_id": task_id}
+    tid = str(uuid.uuid4())
+    task_queue[tid] = {"type": "click", "x": x, "y": y, "time": time.time()}
+    return {"task_id": tid}
 
+# APP轮询获取任务
 @app.get("/client/poll")
-async def poll_task(token: str = Query(...)):
+async def poll_task(token: str = Query()):
     check_token(token)
-    if len(task_queue) > 0:
-        tid = next(iter(task_queue))
-        task_data = task_queue.pop(tid)
-        return {"task_id":tid, "data":task_data}
-    return {"task_id": None}
+    if task_queue:
+        tid, data = task_queue.popitem()
+        return {"task_id": tid, "data": data}
+    return {"task_id": "null"}
 
+# APP上传截图
 @app.post("/client/upload_result")
-async def upload_result(task_id:str, file:UploadFile=File(...), token:str=Query(...)):
+async def upload_result(task_id: str, token: str = Query(), file: UploadFile = File()):
     check_token(token)
-    data = await file.read()
-    result_store[task_id] = {"data":data,"time":time.time()}
-    return {"status":"ok"}
+    img_bytes = await file.read()
+    result_store[task_id] = img_bytes
+    return {"status": "ok"}
 
+# 前端获取截图
 @app.get("/result/{task_id}")
-async def get_result(task_id:str, token:str=Query(...)):
+async def get_image(task_id: str, token: str = Query()):
     check_token(token)
-    item = result_store.get(task_id)
-    if not item:
-        raise HTTPException(status_code=404, detail="暂无结果，请等待平板执行")
+    if task_id not in result_store:
+        raise HTTPException(status_code=404, detail="暂无图片")
     from fastapi.responses import Response
-    return Response(content=item["data"], media_type="image/png")
+    return Response(content=result_store[task_id], media_type="image/png")
+
+# 保活健康检测
+@app.get("/ping")
+async def ping():
+    return {"status":"alive"}
+
