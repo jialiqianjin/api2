@@ -24,29 +24,29 @@ app.add_middleware(
 
 # ========== 配置 ==========
 MAIN_TOKEN = os.getenv("MAIN_TOKEN")
-# 新增远程操控密码，只存在后端环境变量
 REMOTE_CTRL_PWD = os.getenv("REMOTE_CTRL_PWD")
 if not MAIN_TOKEN:
     raise RuntimeError("环境变量 MAIN_TOKEN 未配置！请到平台后台添加")
 if not REMOTE_CTRL_PWD:
     raise RuntimeError("环境变量 REMOTE_CTRL_PWD 未配置！远程操控密码缺失")
-TASK_EXPIRE_SEC = 30       # 任务30秒超时自动清理
-MAX_SCREEN_CACHE = 15      # 最多保留15张截图，防止内存爆炸
-SCREEN_EXPIRE_SEC = 60     # 截图60秒自动过期清理
-MAX_UPLOAD_SIZE = 5 * 1024  # 限制单张图片最大5MB
+TASK_EXPIRE_SEC = 30
+MAX_SCREEN_CACHE = 15
+SCREEN_EXPIRE_SEC = 60
+MAX_UPLOAD_SIZE = 5 * 1024
+
 # ========== 内存存储 ==========
-# OrderedDict 保证任务先进先出 FIFO
 task_queue = OrderedDict()
 result_store = {}
 # WebSocket全局连接
 device_ws = None
 client_ws_list = []
+
 # ========== 工具函数 ==========
 def check_token(token: str):
     if token != MAIN_TOKEN:
         raise HTTPException(status_code=403, detail="访问密钥错误")
+
 def clean_expire():
-    """清理过期任务 + 过期截图 + 限制缓存数量"""
     now = time.time()
     expired_tasks = [k for k, v in task_queue.items() if now - v["time"] > TASK_EXPIRE_SEC]
     for k in expired_tasks:
@@ -60,7 +60,8 @@ def clean_expire():
         del_count = len(result_store) - MAX_SCREEN_CACHE
         for i in range(del_count):
             del result_store[sorted_keys[i]]
-# ========== 原有HTTP接口全部保留（兼容旧功能） ==========
+
+# ========== 原有HTTP接口全部保留 ==========
 @app.get("/api/remote_auth", summary="远程操控密码验证接口")
 async def remote_auth(token: str = Query(), pwd: str = Query()):
     check_token(token)
@@ -68,6 +69,7 @@ async def remote_auth(token: str = Query(), pwd: str = Query()):
         return {"success": True, "msg": "验证通过"}
     else:
         return {"success": False, "msg": "密码错误，请重新输入"}
+
 @app.get("/task/screenshot", summary="网站下发截屏任务")
 async def create_screenshot_task(token: str = Query()):
     check_token(token)
@@ -75,6 +77,7 @@ async def create_screenshot_task(token: str = Query()):
     tid = str(uuid.uuid4())
     task_queue[tid] = {"type": "screenshot", "time": time.time()}
     return {"task_id": tid}
+
 @app.get("/task/click", summary="网站下发点击任务")
 async def create_click_task(x: int, y: int, token: str = Query()):
     check_token(token)
@@ -82,12 +85,14 @@ async def create_click_task(x: int, y: int, token: str = Query()):
     tid = str(uuid.uuid4())
     task_queue[tid] = {"type": "click", "x": x, "y": y, "time": time.time()}
     return {"task_id": tid}
+
 @app.get("/result/{task_id}", summary="前端获取截图图片")
 async def get_image(task_id: str, token: str = Query()):
     check_token(token)
     if task_id not in result_store:
         raise HTTPException(status_code=404, detail="暂无图片")
     return Response(content=result_store[task_id]["data"], media_type="image/jpeg")
+
 @app.get("/client/poll", summary="APP轮询获取任务")
 async def poll_task(token: str = Query()):
     check_token(token)
@@ -97,6 +102,7 @@ async def poll_task(token: str = Query()):
         data = task_queue.pop(tid)
         return {"task_id": tid, "data": data}
     return {"task_id": "null"}
+
 @app.post("/client/upload_result", summary="APP上传截图结果")
 async def upload_result(task_id: str, token: str = Query(), file: UploadFile = File()):
     check_token(token)
@@ -111,46 +117,76 @@ async def upload_result(task_id: str, token: str = Query(), file: UploadFile = F
         "time": time.time()
     }
     return {"status": "ok"}
+
 @app.get("/ping")
 async def ping():
     clean_expire()
     return {"status": "alive", "pending_tasks": len(task_queue), "cached_screens": len(result_store)}
-# ========== 新增WebSocket实时画面通道（低延迟） ==========
+
+# ========== WebSocket实时画面通道（修复版+详细日志） ==========
 # 平板AutoJS连接地址 /ws/device
 @app.websocket("/ws/device")
 async def ws_device(websocket: WebSocket):
     global device_ws
     await websocket.accept()
     device_ws = websocket
+    print("=" * 50)
+    print("✅ 设备端 WebSocket 连接成功")
+    print("=" * 50)
     try:
         while True:
             data_text = await websocket.receive_text()
-            # 平板推送画面，转发所有网页客户端
+            # 打印收到的消息（前200字符，避免日志刷屏）
+            print(f"[设备 → 服务器] 收到消息，长度: {len(data_text)} 字符")
+            print(f"  内容预览: {data_text[:200]}")
+            
+            # 转发给所有网页客户端
+            forward_count = 0
             for cli in client_ws_list:
                 try:
                     await cli.send_text(data_text)
-                except:
-                    pass
+                    forward_count += 1
+                except Exception as e:
+                    print(f"  ⚠️ 转发给某个网页客户端失败: {e}")
+            print(f"  📤 已转发给 {forward_count} 个网页客户端")
     except WebSocketDisconnect:
+        print("❌ 设备端 WebSocket 连接断开")
         device_ws = None
+    except Exception as e:
+        print(f"❌ 设备端异常: {str(e)}")
+        device_ws = None
+
 # 网页前端连接地址 /ws/client
 @app.websocket("/ws/client")
 async def ws_client(websocket: WebSocket):
     global device_ws
     await websocket.accept()
     client_ws_list.append(websocket)
+    print("=" * 50)
+    print(f"✅ 网页端 WebSocket 连接成功，当前在线: {len(client_ws_list)} 个")
+    print("=" * 50)
     try:
         while True:
             msg = await websocket.receive_text()
-            # 网页下发点击指令，直接发给平板
+            print(f"[网页 → 服务器] 收到指令: {msg[:200]}")
+            # 下发点击指令给平板
             if device_ws is not None:
                 try:
                     await device_ws.send_text(msg)
-                except:
-                    pass
+                    print(f"  📤 指令已转发给设备端")
+                except Exception as e:
+                    print(f"  ⚠️ 转发给设备失败: {e}")
+            else:
+                print(f"  ⚠️ 设备端未连接，指令丢弃")
     except WebSocketDisconnect:
         if websocket in client_ws_list:
             client_ws_list.remove(websocket)
+        print(f"❌ 网页端断开，剩余在线: {len(client_ws_list)} 个")
+    except Exception as e:
+        print(f"❌ 网页端异常: {str(e)}")
+        if websocket in client_ws_list:
+            client_ws_list.remove(websocket)
+
 
 
 
