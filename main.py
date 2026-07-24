@@ -1,4 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 import uuid
 import time
@@ -64,7 +65,7 @@ def clean_expire():
 # ========== 请求体模型 ==========
 class ImageBase64Body(BaseModel):
     image: str
-    task_id: str  # ✅ 把task_id放进请求体，不用url传参
+    task_id: str  # ✅ task_id放入请求JSON体内
 
 # ========== HTTP接口 ==========
 @app.get("/api/remote_auth", summary="远程操控密码验证接口")
@@ -126,7 +127,7 @@ async def poll_task(token: str = Query()):
             return {"task_id": tid, "data": data}
         return {"task_id": "null"}
     except Exception as e:
-        # ❗异常时依旧返回合法JSON，防止AutoJS解析崩溃
+        # 异常返回合法JSON，防止AutoJS解析崩溃
         return {"task_id": "null", "error": str(e)}
 
 @app.post("/client/upload_result", summary="APP上传截图结果（文件上传）")
@@ -147,7 +148,7 @@ async def upload_result(task_id: str, token: str = Query(), file: UploadFile = F
         print(f"上传异常: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
-# ========== base64上传接口（适配AutoJS6，task_id放到body内） ==========
+# ========== base64上传接口（适配AutoJS6） ==========
 @app.post("/client/upload_base64", summary="APP上传截图结果（base64）")
 async def upload_base64(token: str = Query(), body: ImageBase64Body = None):
     try:
@@ -178,7 +179,7 @@ async def ping():
         "cached_screens": len(result_store)
     }
 
-# ========== WebSocket（保留兼容 ==========
+# ========== WebSocket 链路 ==========
 @app.websocket("/ws/device")
 async def ws_device(websocket: WebSocket):
     global device_ws
@@ -221,5 +222,6 @@ async def ws_client(websocket: WebSocket):
         print(f"网页ws异常:{e}")
         if websocket in client_ws_list:
             client_ws_list.remove(websocket)
+
 
 
