@@ -1,5 +1,4 @@
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 import uuid
 import time
@@ -65,92 +64,110 @@ def clean_expire():
 # ========== 请求体模型 ==========
 class ImageBase64Body(BaseModel):
     image: str
+    task_id: str  # ✅ 把task_id放进请求体，不用url传参
 
 # ========== HTTP接口 ==========
 @app.get("/api/remote_auth", summary="远程操控密码验证接口")
 async def remote_auth(token: str = Query(), pwd: str = Query()):
-    check_token(token)
-    if pwd == REMOTE_CTRL_PWD:
-        return {"success": True, "msg": "验证通过"}
-    else:
-        return {"success": False, "msg": "密码错误，请重新输入"}
+    try:
+        check_token(token)
+        if pwd == REMOTE_CTRL_PWD:
+            return {"success": True, "msg": "验证通过"}
+        else:
+            return {"success": False, "msg": "密码错误，请重新输入"}
+    except Exception as e:
+        return {"success": False, "msg": str(e)}
 
 @app.get("/task/screenshot", summary="网站下发截屏任务")
 async def create_screenshot_task(token: str = Query()):
-    check_token(token)
-    clean_expire()
-    tid = str(uuid.uuid4())
-    task_queue[tid] = {"type": "screenshot", "time": time.time()}
-    return {"task_id": tid}
+    try:
+        check_token(token)
+        clean_expire()
+        tid = str(uuid.uuid4())
+        task_queue[tid] = {"type": "screenshot", "time": time.time()}
+        return {"task_id": tid}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/task/click", summary="网站下发点击任务")
 async def create_click_task(x: int, y: int, token: str = Query()):
-    check_token(token)
-    clean_expire()
-    tid = str(uuid.uuid4())
-    task_queue[tid] = {"type": "click", "x": x, "y": y, "time": time.time()}
-    return {"task_id": tid}
+    try:
+        check_token(token)
+        clean_expire()
+        tid = str(uuid.uuid4())
+        task_queue[tid] = {"type": "click", "x": x, "y": y, "time": time.time()}
+        return {"task_id": tid}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/result/{task_id}", summary="前端获取截图图片")
 async def get_image(task_id: str, token: str = Query()):
-    check_token(token)
-    if task_id not in result_store:
-        print(f"[GET /result] 图片不存在: {task_id}")
-        raise HTTPException(status_code=404, detail="暂无图片")
-    print(f"[GET /result] 返回图片: {task_id}, 大小: {len(result_store[task_id]['data'])} 字节")
-    return Response(content=result_store[task_id]["data"], media_type="image/jpeg")
+    try:
+        check_token(token)
+        clean_expire()
+        if task_id not in result_store:
+            print(f"[GET /result] 图片不存在: {task_id}")
+            raise HTTPException(status_code=404, detail="暂无图片")
+        print(f"[GET /result] 返回图片: {task_id}, 大小: {len(result_store[task_id]['data'])} 字节")
+        return Response(content=result_store[task_id]["data"], media_type="image/jpeg")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/client/poll", summary="APP轮询获取任务")
 async def poll_task(token: str = Query()):
-    check_token(token)
-    clean_expire()
-    if task_queue:
-        tid = next(iter(task_queue.keys()))
-        data = task_queue.pop(tid)
-        return {"task_id": tid, "data": data}
-    return {"task_id": "null"}
+    try:
+        check_token(token)
+        clean_expire()
+        if task_queue:
+            tid = next(iter(task_queue.keys()))
+            data = task_queue.pop(tid)
+            return {"task_id": tid, "data": data}
+        return {"task_id": "null"}
+    except Exception as e:
+        # ❗异常时依旧返回合法JSON，防止AutoJS解析崩溃
+        return {"task_id": "null", "error": str(e)}
 
 @app.post("/client/upload_result", summary="APP上传截图结果（文件上传）")
 async def upload_result(task_id: str, token: str = Query(), file: UploadFile = File()):
-    check_token(token)
-    print(f"[POST /upload_result] 收到上传请求, task_id={task_id}, 文件名={file.filename}, 大小={file.size}")
-    if file.size and file.size > MAX_UPLOAD_SIZE:
-        print(f"  ❌ 图片过大: {file.size} > {MAX_UPLOAD_SIZE}")
-        raise HTTPException(status_code=413, detail="图片文件过大，上限5MB")
     try:
+        check_token(token)
+        print(f"[POST /upload_result] 收到上传请求, task_id={task_id}, 文件名={file.filename}")
+        if file.size and file.size > MAX_UPLOAD_SIZE:
+            raise HTTPException(status_code=413, detail="图片文件过大，上限5MB")
         img_bytes = await file.read()
-        print(f"  ✅ 读取成功, 大小: {len(img_bytes)} 字节")
+        result_store[task_id] = {
+            "data": img_bytes,
+            "time": time.time()
+        }
+        print(f"  ✅ 已存入缓存")
+        return {"status": "ok"}
     except Exception as e:
-        print(f"  ❌ 读取图片失败: {e}")
-        raise HTTPException(status_code=400, detail="读取图片失败")
-    result_store[task_id] = {
-        "data": img_bytes,
-        "time": time.time()
-    }
-    print(f"  ✅ 已存入缓存, 当前缓存数量: {len(result_store)}")
-    return {"status": "ok"}
+        print(f"上传异常: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
 
-# ========== 新增：base64上传接口（适配AutoJS6安卓9） ==========
+# ========== base64上传接口（适配AutoJS6，task_id放到body内） ==========
 @app.post("/client/upload_base64", summary="APP上传截图结果（base64）")
-async def upload_base64(task_id: str, token: str = Query(), body: ImageBase64Body = None):
-    check_token(token)
-    print(f"[POST /upload_base64] 收到base64上传, task_id={task_id}")
+async def upload_base64(token: str = Query(), body: ImageBase64Body = None):
     try:
+        check_token(token)
+        tid = body.task_id
+        print(f"[POST /upload_base64] task_id={tid}")
         img_bytes = base64.b64decode(body.image)
         img_size = len(img_bytes)
         print(f"  ✅ base64解码成功, 大小: {img_size} 字节")
         if img_size > MAX_UPLOAD_SIZE:
-            print(f"  ❌ 图片过大: {img_size} > {MAX_UPLOAD_SIZE}")
             raise HTTPException(status_code=413, detail="图片文件过大，上限5MB")
+        result_store[tid] = {
+            "data": img_bytes,
+            "time": time.time()
+        }
+        print(f"  ✅ 缓存写入完成")
+        return {"status": "ok"}
     except Exception as e:
-        print(f"  ❌ base64解码失败: {e}")
-        raise HTTPException(status_code=400, detail=f"base64解码失败: {str(e)}")
-    result_store[task_id] = {
-        "data": img_bytes,
-        "time": time.time()
-    }
-    print(f"  ✅ 已存入缓存, 当前缓存数量: {len(result_store)}")
-    return {"status": "ok"}
+        print(f"base64上传异常：{e}")
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/ping")
 async def ping():
@@ -158,36 +175,32 @@ async def ping():
     return {
         "status": "alive",
         "pending_tasks": len(task_queue),
-        "cached_screens": len(result_store),
-        "cache_keys": list(result_store.keys())
+        "cached_screens": len(result_store)
     }
 
-# ========== WebSocket（保留兼容，不用管） ==========
+# ========== WebSocket（保留兼容 ==========
 @app.websocket("/ws/device")
 async def ws_device(websocket: WebSocket):
     global device_ws
     await websocket.accept()
     device_ws = websocket
-    print("=" * 50)
     print("✅ 设备端 WebSocket 连接成功")
-    print("=" * 50)
     try:
         while True:
             data_text = await websocket.receive_text()
-            print(f"[设备 → 服务器] 收到消息，长度: {len(data_text)} 字符")
             forward_count = 0
             for cli in client_ws_list:
                 try:
                     await cli.send_text(data_text)
                     forward_count += 1
-                except Exception as e:
-                    print(f"  ⚠️ 转发失败: {e}")
+                except Exception:
+                    pass
             print(f"  📤 已转发给 {forward_count} 个网页客户端")
     except WebSocketDisconnect:
-        print("❌ 设备端 WebSocket 连接断开")
+        print("❌ 设备端 WebSocket 断开")
         device_ws = None
     except Exception as e:
-        print(f"❌ 设备端异常: {str(e)}")
+        print(f"设备ws异常: {e}")
         device_ws = None
 
 @app.websocket("/ws/client")
@@ -195,27 +208,18 @@ async def ws_client(websocket: WebSocket):
     global device_ws
     await websocket.accept()
     client_ws_list.append(websocket)
-    print("=" * 50)
-    print(f"✅ 网页端 WebSocket 连接成功，当前在线: {len(client_ws_list)} 个")
-    print("=" * 50)
+    print(f"✅ 网页端WebSocket连接，在线:{len(client_ws_list)}")
     try:
         while True:
             msg = await websocket.receive_text()
-            print(f"[网页 → 服务器] 收到指令: {msg[:200]}")
             if device_ws is not None:
-                try:
-                    await device_ws.send_text(msg)
-                    print(f"  📤 指令已转发给设备端")
-                except Exception as e:
-                    print(f"  ⚠️ 转发给设备失败: {e}")
-            else:
-                print(f"  ⚠️ 设备端未连接，指令丢弃")
+                await device_ws.send_text(msg)
     except WebSocketDisconnect:
         if websocket in client_ws_list:
             client_ws_list.remove(websocket)
-        print(f"❌ 网页端断开，剩余在线: {len(client_ws_list)} 个")
     except Exception as e:
-        print(f"❌ 网页端异常: {str(e)}")
+        print(f"网页ws异常:{e}")
         if websocket in client_ws_list:
             client_ws_list.remove(websocket)
+
 
