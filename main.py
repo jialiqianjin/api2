@@ -32,12 +32,11 @@ if not REMOTE_CTRL_PWD:
 TASK_EXPIRE_SEC = 30
 MAX_SCREEN_CACHE = 15
 SCREEN_EXPIRE_SEC = 60
-MAX_UPLOAD_SIZE = 5 * 1024
+MAX_UPLOAD_SIZE = 5 * 1024 * 1024  # 修复：5MB（之前写错成5KB了）
 
 # ========== 内存存储 ==========
 task_queue = OrderedDict()
 result_store = {}
-# WebSocket全局连接
 device_ws = None
 client_ws_list = []
 
@@ -61,7 +60,7 @@ def clean_expire():
         for i in range(del_count):
             del result_store[sorted_keys[i]]
 
-# ========== 原有HTTP接口全部保留 ==========
+# ========== HTTP接口 ==========
 @app.get("/api/remote_auth", summary="远程操控密码验证接口")
 async def remote_auth(token: str = Query(), pwd: str = Query()):
     check_token(token)
@@ -90,7 +89,9 @@ async def create_click_task(x: int, y: int, token: str = Query()):
 async def get_image(task_id: str, token: str = Query()):
     check_token(token)
     if task_id not in result_store:
+        print(f"[GET /result] 图片不存在: {task_id}")
         raise HTTPException(status_code=404, detail="暂无图片")
+    print(f"[GET /result] 返回图片: {task_id}, 大小: {len(result_store[task_id]['data'])} 字节")
     return Response(content=result_store[task_id]["data"], media_type="image/jpeg")
 
 @app.get("/client/poll", summary="APP轮询获取任务")
@@ -106,25 +107,34 @@ async def poll_task(token: str = Query()):
 @app.post("/client/upload_result", summary="APP上传截图结果")
 async def upload_result(task_id: str, token: str = Query(), file: UploadFile = File()):
     check_token(token)
+    print(f"[POST /upload_result] 收到上传请求, task_id={task_id}, 文件名={file.filename}, 大小={file.size}")
     if file.size and file.size > MAX_UPLOAD_SIZE:
+        print(f"  ❌ 图片过大: {file.size} > {MAX_UPLOAD_SIZE}")
         raise HTTPException(status_code=413, detail="图片文件过大，上限5MB")
     try:
         img_bytes = await file.read()
+        print(f"  ✅ 读取成功, 大小: {len(img_bytes)} 字节")
     except Exception as e:
+        print(f"  ❌ 读取图片失败: {e}")
         raise HTTPException(status_code=400, detail="读取图片失败")
     result_store[task_id] = {
         "data": img_bytes,
         "time": time.time()
     }
+    print(f"  ✅ 已存入缓存, 当前缓存数量: {len(result_store)}")
     return {"status": "ok"}
 
 @app.get("/ping")
 async def ping():
     clean_expire()
-    return {"status": "alive", "pending_tasks": len(task_queue), "cached_screens": len(result_store)}
+    return {
+        "status": "alive",
+        "pending_tasks": len(task_queue),
+        "cached_screens": len(result_store),
+        "cache_keys": list(result_store.keys())
+    }
 
-# ========== WebSocket实时画面通道（修复版+详细日志） ==========
-# 平板AutoJS连接地址 /ws/device
+# ========== WebSocket（保留兼容，不用管） ==========
 @app.websocket("/ws/device")
 async def ws_device(websocket: WebSocket):
     global device_ws
@@ -136,18 +146,14 @@ async def ws_device(websocket: WebSocket):
     try:
         while True:
             data_text = await websocket.receive_text()
-            # 打印收到的消息（前200字符，避免日志刷屏）
             print(f"[设备 → 服务器] 收到消息，长度: {len(data_text)} 字符")
-            print(f"  内容预览: {data_text[:200]}")
-            
-            # 转发给所有网页客户端
             forward_count = 0
             for cli in client_ws_list:
                 try:
                     await cli.send_text(data_text)
                     forward_count += 1
                 except Exception as e:
-                    print(f"  ⚠️ 转发给某个网页客户端失败: {e}")
+                    print(f"  ⚠️ 转发失败: {e}")
             print(f"  📤 已转发给 {forward_count} 个网页客户端")
     except WebSocketDisconnect:
         print("❌ 设备端 WebSocket 连接断开")
@@ -156,7 +162,6 @@ async def ws_device(websocket: WebSocket):
         print(f"❌ 设备端异常: {str(e)}")
         device_ws = None
 
-# 网页前端连接地址 /ws/client
 @app.websocket("/ws/client")
 async def ws_client(websocket: WebSocket):
     global device_ws
@@ -169,7 +174,6 @@ async def ws_client(websocket: WebSocket):
         while True:
             msg = await websocket.receive_text()
             print(f"[网页 → 服务器] 收到指令: {msg[:200]}")
-            # 下发点击指令给平板
             if device_ws is not None:
                 try:
                     await device_ws.send_text(msg)
@@ -186,8 +190,3 @@ async def ws_client(websocket: WebSocket):
         print(f"❌ 网页端异常: {str(e)}")
         if websocket in client_ws_list:
             client_ws_list.remove(websocket)
-
-
-
-
-
