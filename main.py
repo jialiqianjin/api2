@@ -5,7 +5,9 @@ import uuid
 import time
 import os
 import json
+import base64
 from collections import OrderedDict
+from pydantic import BaseModel
 
 app = FastAPI()
 
@@ -32,7 +34,7 @@ if not REMOTE_CTRL_PWD:
 TASK_EXPIRE_SEC = 30
 MAX_SCREEN_CACHE = 15
 SCREEN_EXPIRE_SEC = 60
-MAX_UPLOAD_SIZE = 5 * 1024 * 1024  # 修复：5MB（之前写错成5KB了）
+MAX_UPLOAD_SIZE = 5 * 1024 * 1024  # 5MB
 
 # ========== 内存存储 ==========
 task_queue = OrderedDict()
@@ -59,6 +61,10 @@ def clean_expire():
         del_count = len(result_store) - MAX_SCREEN_CACHE
         for i in range(del_count):
             del result_store[sorted_keys[i]]
+
+# ========== 请求体模型 ==========
+class ImageBase64Body(BaseModel):
+    image: str
 
 # ========== HTTP接口 ==========
 @app.get("/api/remote_auth", summary="远程操控密码验证接口")
@@ -104,7 +110,7 @@ async def poll_task(token: str = Query()):
         return {"task_id": tid, "data": data}
     return {"task_id": "null"}
 
-@app.post("/client/upload_result", summary="APP上传截图结果")
+@app.post("/client/upload_result", summary="APP上传截图结果（文件上传）")
 async def upload_result(task_id: str, token: str = Query(), file: UploadFile = File()):
     check_token(token)
     print(f"[POST /upload_result] 收到上传请求, task_id={task_id}, 文件名={file.filename}, 大小={file.size}")
@@ -117,6 +123,28 @@ async def upload_result(task_id: str, token: str = Query(), file: UploadFile = F
     except Exception as e:
         print(f"  ❌ 读取图片失败: {e}")
         raise HTTPException(status_code=400, detail="读取图片失败")
+    result_store[task_id] = {
+        "data": img_bytes,
+        "time": time.time()
+    }
+    print(f"  ✅ 已存入缓存, 当前缓存数量: {len(result_store)}")
+    return {"status": "ok"}
+
+# ========== 新增：base64上传接口（适配AutoJS6安卓9） ==========
+@app.post("/client/upload_base64", summary="APP上传截图结果（base64）")
+async def upload_base64(task_id: str, token: str = Query(), body: ImageBase64Body = None):
+    check_token(token)
+    print(f"[POST /upload_base64] 收到base64上传, task_id={task_id}")
+    try:
+        img_bytes = base64.b64decode(body.image)
+        img_size = len(img_bytes)
+        print(f"  ✅ base64解码成功, 大小: {img_size} 字节")
+        if img_size > MAX_UPLOAD_SIZE:
+            print(f"  ❌ 图片过大: {img_size} > {MAX_UPLOAD_SIZE}")
+            raise HTTPException(status_code=413, detail="图片文件过大，上限5MB")
+    except Exception as e:
+        print(f"  ❌ base64解码失败: {e}")
+        raise HTTPException(status_code=400, detail=f"base64解码失败: {str(e)}")
     result_store[task_id] = {
         "data": img_bytes,
         "time": time.time()
@@ -190,3 +218,4 @@ async def ws_client(websocket: WebSocket):
         print(f"❌ 网页端异常: {str(e)}")
         if websocket in client_ws_list:
             client_ws_list.remove(websocket)
+
